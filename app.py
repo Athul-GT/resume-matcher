@@ -18,16 +18,44 @@ SYNONYMS = {
     "ml": "machine learning",
     "dl": "deep learning",
     "nlp": "natural language processing",
+    "cv": "computer vision",
+    "oop": "object oriented programming",
+    "oops": "object oriented programming",
     "sklearn": "scikit-learn",
     "scikit learn": "scikit-learn",
     "js": "javascript",
+    "postgres": "postgresql",
+    "k8s": "kubernetes",
+    "gen ai": "generative ai",
+    "genai": "generative ai",
+    "large language models": "llm",
+    "rest apis": "rest api",
+    "restful": "rest api",
 }
+
+SKILLS = [
+    "python", "java", "javascript", "typescript", "c++", "c#", "sql", "mysql",
+    "postgresql", "mongodb", "html", "css", "react", "node.js", "django",
+    "flask", "fastapi", "streamlit", "git", "github", "docker", "kubernetes",
+    "aws", "azure", "gcp", "linux", "rest api", "ci/cd", "flutter", "firebase",
+    "android", "machine learning", "deep learning", "natural language processing",
+    "computer vision", "generative ai", "llm", "transformers", "scikit-learn",
+    "pandas", "numpy", "matplotlib", "seaborn", "tensorflow", "pytorch", "keras",
+    "opencv", "data structures", "algorithms", "object oriented programming",
+    "statistics", "data analysis", "data visualization", "feature engineering",
+    "model deployment", "mlops", "power bi", "tableau", "excel", "spark",
+    "hadoop", "airflow", "nlp", "langchain", "hugging face", "jupyter",
+]
 
 def normalize(text):
     text = text.lower()
     for short, full in SYNONYMS.items():
-        text = re.sub(r"\b" + re.escape(short) + r"\b", full, text)
+        text = re.sub(r"(?<![a-z0-9+#.\-])" + re.escape(short) + r"(?![a-z0-9+#\-])", full, text)
     return text
+
+def has_skill(text, skill):
+    pattern = r"(?<![a-z0-9+#.\-])" + re.escape(skill) + r"(?![a-z0-9+#\-])"
+    return re.search(pattern, text) is not None
 
 def read_pdf(file):
     text = ""
@@ -42,30 +70,37 @@ def analyze(resume_raw, jd_raw):
     resume_text = normalize(resume_raw)
     jd_clean = normalize(jd_raw)
 
+    # 1) Skill match (main score)
+    jd_skills = [s for s in SKILLS if has_skill(jd_clean, s)]
+    have = [s for s in jd_skills if has_skill(resume_text, s)]
+    lack = [s for s in jd_skills if s not in have]
+    skill_score = (len(have) / len(jd_skills) * 100) if jd_skills else 0
+
+    # 2) Text similarity (secondary score, single words only)
     vectorizer = TfidfVectorizer(
         stop_words=STOP_WORDS,
         token_pattern=r"[A-Za-z][A-Za-z0-9+#\-]*",
-        ngram_range=(1, 2),
     )
     matrix = vectorizer.fit_transform([resume_text, jd_clean])
-    score = cosine_similarity(matrix[0], matrix[1])[0][0] * 100
+    text_score = cosine_similarity(matrix[0], matrix[1])[0][0] * 100
 
+    # 3) Other important JD words not in the resume
     words = vectorizer.get_feature_names_out()
     resume_scores = matrix[0].toarray()[0]
     jd_scores = matrix[1].toarray()[0]
+    other = sorted(
+        [(j, w) for w, r, j in zip(words, resume_scores, jd_scores) if j > 0 and r == 0],
+        reverse=True,
+    )
 
-    missing, matched = [], []
-    for word, r, j in zip(words, resume_scores, jd_scores):
-        if j > 0 and r == 0:
-            missing.append((j, word))
-        elif j > 0 and r > 0:
-            matched.append((j, word))
-    missing.sort(reverse=True)
-    matched.sort(reverse=True)
-
-    total = len(matched) + len(missing)
-    coverage = (len(matched) / total * 100) if total else 0
-    return score, coverage, [w for _, w in missing], [w for _, w in matched]
+    return {
+        "skill_score": skill_score,
+        "text_score": text_score,
+        "jd_skill_count": len(jd_skills),
+        "have": have,
+        "lack": lack,
+        "other": [w for _, w in other if w not in jd_skills],
+    }
 
 # ---------- Page ----------
 st.title("Resume vs Job Description Matcher")
@@ -78,44 +113,44 @@ if st.button("Analyze"):
     if not pdf or not company.strip() or not jd_text.strip():
         st.warning("Please upload your resume, enter the company name and paste the job description.")
     else:
-        score, coverage, missing, matched = analyze(read_pdf(pdf), jd_text)
+        result = analyze(read_pdf(pdf), jd_text)
+        result["company"] = company.strip()
+        st.session_state["latest"] = result
 
-        # keep the latest full result so it stays on screen after re-runs
-        st.session_state["latest"] = {
-            "company": company.strip(),
-            "score": score,
-            "coverage": coverage,
-            "missing": missing,
-            "matched": matched,
-        }
-
-        # save a short row; replace an older row for the same company
         history = [
             h for h in st.session_state.get("history", [])
             if h["Company"].lower() != company.strip().lower()
         ]
         history.append({
             "Company": company.strip(),
-            "Match score %": round(score),
-            "Coverage %": round(coverage),
-            "Top missing keywords": ", ".join(missing[:10]),
+            "Skill match %": round(result["skill_score"]),
+            "Skills asked": result["jd_skill_count"],
+            "Text similarity %": round(result["text_score"]),
+            "Missing skills": ", ".join(result["lack"][:10]),
         })
         st.session_state["history"] = history
 
-# ---------- Latest result ----------
 if "latest" in st.session_state:
     r = st.session_state["latest"]
     st.header(f"Result for {r['company']}")
-    col1, col2 = st.columns(2)
-    col1.metric("Match score", f"{r['score']:.0f}%")
-    col2.metric("Keyword coverage", f"{r['coverage']:.0f}%")
+    c1, c2 = st.columns(2)
+    c1.metric("Skill match", f"{r['skill_score']:.0f}%",
+              help="Share of the tech skills named in the JD that appear in your resume")
+    c2.metric("Text similarity", f"{r['text_score']:.0f}%",
+              help="Overall word overlap. Usually low, so use it only to compare")
 
-    st.subheader("Missing keywords (in the JD, not in your resume)")
-    st.write(", ".join(r["missing"][:25]))
-    st.subheader("Matched keywords")
-    st.write(", ".join(r["matched"][:25]))
+    if r["jd_skill_count"] == 0:
+        st.info("No known tech skills were found in this JD. Check that you pasted the full description.")
+    else:
+        st.write(f"The JD mentions **{r['jd_skill_count']}** known skills. You have **{len(r['have'])}** of them.")
 
-# ---------- Saved results (one section) ----------
+    st.subheader("Skills you have")
+    st.write(", ".join(r["have"]) or "None found")
+    st.subheader("Skills missing from your resume")
+    st.write(", ".join(r["lack"]) or "None. You cover every skill listed.")
+    st.subheader("Other important JD words not in your resume")
+    st.write(", ".join(r["other"][:20]))
+
 st.divider()
 st.subheader("Saved results (this session only)")
 
